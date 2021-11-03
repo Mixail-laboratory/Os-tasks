@@ -1,0 +1,186 @@
+#include <stdio.h>
+#include "line_list.h"
+#include "read_line.h"
+#include <fcntl.h>
+#include <errno.h>
+
+#define BUF_SIZE 1024
+char buf[BUF_SIZE];
+
+int scan_file(size_t fd, struct list *list) {
+    struct line curr;
+    curr.offset = 0;
+    int eof = 0, new_line = 1;
+    while (!eof) {
+        off_t pos = lseek(fd, 0, SEEK_CUR);
+        ssize_t bytes_read = read(fd, buf, BUF_SIZE);
+        if (bytes_read == -1)
+            return 0;
+        // EOF
+        if (!bytes_read) {
+            // Simulate line break
+            buf[0] = '\n';
+            bytes_read = 1;
+            eof = 1;
+        }
+        for (size_t i = 0; i < bytes_read; i++) {
+            if (new_line) {
+                curr.offset = pos + i;
+                new_line = 0;
+            }
+            if (buf[i] == '\n') {
+                curr.len = pos + i - curr.offset;
+                new_line = 1;
+                if (!add_line(list, &curr))
+                    return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+
+int print_line(int fd, struct line *line) {
+    lseek(fd, line->offset, SEEK_SET);
+    off_t count_left = line->len;
+    while (count_left > 0) {
+        ssize_t bytes_read = read(fd, buf, BUF_SIZE - 1);
+        if (bytes_read == -1) {
+            perror("Read failed");
+            return 0;
+        }
+        size_t cnt = count_left > bytes_read ? bytes_read : count_left;
+        buf[cnt] = 0;
+        count_left -= cnt;
+        if (puts(buf) == EOF) {
+            fprintf(stderr, "Write failed\n");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int print_lines(int fd, struct list *table) {
+    struct node *n = table->head;
+    while (n != NULL) {
+        if (!print_line(fd, &n->line))
+            return 0;
+        n = n->next;
+    }
+    return 1;
+}
+
+int str_to_long(const char *str, long *res) {
+    char *end;
+    errno = 0;
+    *res = strtol(str, &end, 10);
+    // String contains invalid characters or an error occured.
+    if (*end || errno)
+        return 0;
+    return 1;
+}
+
+
+int input_valid_line(struct file *f, char *buf, size_t size) {
+    for(;;) {
+        printf("Enter line number or 0 to quit\n");
+        ssize_t len;
+        int too_long = 0;
+        for(;;) {
+            len = read_line(f, buf, size, 5);
+            if (len == FAIL || len == MC_EOF || len == TIMEOUT)
+                return len;
+
+            if (len == 1) // Empty line
+                continue;
+            if (buf[len - 1] == '\n')
+                break;
+            else
+                too_long = 1;
+        }
+        if (!too_long) {
+            // Replace '\n' with '\0'
+            buf[len - 1] = '\0';
+            return 0;
+        }
+        printf("Input string is too long\n");
+    }
+}
+
+
+int main(int argc, const char *argv[]) {
+    if (argc != 2) {
+        printf("No filename specified\n");
+    }
+
+    const char *filename = argv[1];
+    int fd;
+
+    if ((fd = open(filename, O_RDONLY)) == -1) {
+        perror("Unable to open file");
+        return 1;
+    }
+    int err = 0;
+    struct list table;
+    init_list(&table);
+    if (!scan_file(fd, &table))
+        perror("File scan failed");
+    else {
+        struct file *f = make_buffered_file(0, 1024);
+
+        while (!err) {
+            int should_quit = 0;
+            char input[22];
+            switch (input_valid_line(f, input, 22)) {
+                case MC_EOF:
+                    should_quit = 1;
+                    break;
+                case FAIL:
+                    fprintf(stderr, "input_valid_line failed\n");
+                    err = 1;
+                    continue;
+                case TIMEOUT:
+                    if (!print_lines(fd, &table))
+                        fprintf(stderr, "print_lines failed\n");
+                    should_quit = 1;
+                    break;
+            }
+            if (should_quit)
+                break;
+
+            long num;
+            if (!str_to_long(input, &num)) {
+                printf("Input string is not a number or too long\n");
+                continue;
+            }
+
+            if (num == 0)
+                break;
+            if (num < 0) {
+                printf("Please enter positive number\n");
+                continue;
+            }
+            struct node *node = get_node(table.head, num - 1);
+            if (node == NULL) {
+                printf("No such line\n");
+                continue;
+            }
+
+            if (!print_line(fd, &node->line)) {
+                fprintf(stderr, "print_line failed\n");
+                err = 1;
+                break;
+            }
+        }
+
+        free_buffered_file(f);
+    }
+    free_list(&table);
+
+    if (close(fd)) {
+        perror("Unable to close file");
+        return 1;
+    }
+  return err;
+
+}
